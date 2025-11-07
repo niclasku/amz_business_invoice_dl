@@ -114,7 +114,46 @@ python src/amazon_invoice_downloader.py \
 
 ## Docker Usage
 
-### Build the Image
+### Using Pre-built Image from GitHub Container Registry
+
+The Docker image is automatically built and pushed to GitHub Container Registry (ghcr.io) on every push to the main branch.
+
+**Pull and run the image:**
+```bash
+docker pull ghcr.io/niclasku/amz_business_invoice_dl:latest
+```
+
+**With local storage:**
+```bash
+docker run --rm \
+  -v $(pwd)/invoices:/app/invoices \
+  -v $(pwd)/data:/app/data \
+  ghcr.io/niclasku/amz_business_invoice_dl:latest \
+  python amazon_invoice_downloader.py \
+    --email YOUR_EMAIL \
+    --password YOUR_PASSWORD \
+    --output-folder /app/invoices \
+    --db-path /app/data/invoices.db \
+    --min-year 2025
+```
+
+**With paperless-ngx upload:**
+```bash
+docker run --rm \
+  -v $(pwd)/data:/app/data \
+  ghcr.io/niclasku/amz_business_invoice_dl:latest \
+  python amazon_invoice_downloader.py \
+    --email YOUR_EMAIL \
+    --password YOUR_PASSWORD \
+    --db-path /app/data/invoices.db \
+    --paperless-url https://paperless.example.com \
+    --paperless-token YOUR_API_TOKEN \
+    --paperless-correspondent 1 \
+    --paperless-document-type 2 \
+    --paperless-tags 3 4 5
+```
+
+### Build the Image Locally
 
 For your architecture (Docker will auto-detect):
 ```bash
@@ -130,7 +169,7 @@ docker build --platform linux/amd64 -t amazon-invoice-downloader:latest .
 docker build --platform linux/arm64 -t amazon-invoice-downloader:latest .
 ```
 
-### Run with Docker
+### Run with Docker (Local Build)
 
 **With local storage:**
 ```bash
