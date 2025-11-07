@@ -3,6 +3,8 @@ import os
 import time
 import argparse
 import logging
+import re
+import signal
 from typing import Optional, List
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -271,8 +273,54 @@ class AmazonInvoiceDownloader:
                 self.driver.quit()
 
 
+def parse_schedule_interval(schedule_str: str) -> int:
+    """Parse schedule interval string to seconds.
+    
+    Examples:
+        "1h" -> 3600 seconds
+        "24h" -> 86400 seconds
+        "1d" -> 86400 seconds
+        "7d" -> 604800 seconds
+        "12h" -> 43200 seconds
+    """
+    if not schedule_str:
+        return 0
+    
+    # Match pattern: number followed by 'h' (hours) or 'd' (days)
+    match = re.match(r'^(\d+)([hd])$', schedule_str.lower())
+    if not match:
+        raise ValueError(f"Invalid schedule format: {schedule_str}. Use format like '1h', '24h', '1d', '7d'")
+    
+    value = int(match.group(1))
+    unit = match.group(2)
+    
+    if unit == 'h':
+        return value * 3600  # Convert hours to seconds
+    elif unit == 'd':
+        return value * 86400  # Convert days to seconds
+    
+    raise ValueError(f"Invalid schedule unit: {unit}. Use 'h' for hours or 'd' for days")
+
+
+# Global flag for graceful shutdown
+shutdown_requested = False
+
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    global shutdown_requested
+    shutdown_requested = True
+    logging.getLogger(__name__).info("Shutdown signal received. Finishing current run...")
+
+
 def main():
     """Main entry point."""
+    global shutdown_requested
+    
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     parser = argparse.ArgumentParser(description='Amazon sign-in automation and invoice download')
     parser.add_argument('--email', required=True, help='Email address for Amazon account')
     parser.add_argument('--password', required=True, help='Password for Amazon account')
@@ -288,11 +336,24 @@ def main():
     parser.add_argument('--paperless-tags', type=int, nargs='+', help='Paperless-ngx tag IDs (can specify multiple)')
     parser.add_argument('--paperless-storage-path', type=int, help='Paperless-ngx storage path ID')
     
+    # Scheduling argument
+    parser.add_argument('--schedule', type=str, help='Run on a schedule. Format: "1h" (hours) or "1d" (days). Example: "24h" for daily, "1d" for daily, "12h" for twice daily')
+    
     args = parser.parse_args()
     
     # Validate that either output folder or paperless is configured
     if not args.output_folder and not (args.paperless_url and args.paperless_token):
         parser.error("Either --output-folder or --paperless-url and --paperless-token must be specified")
+    
+    # Parse schedule interval if provided
+    schedule_seconds = 0
+    if args.schedule:
+        try:
+            schedule_seconds = parse_schedule_interval(args.schedule)
+            logger = logging.getLogger(__name__)
+            logger.info(f"Scheduled mode enabled. Running every {args.schedule} ({schedule_seconds} seconds)")
+        except ValueError as e:
+            parser.error(str(e))
     
     downloader = AmazonInvoiceDownloader(
         email=args.email,
@@ -308,7 +369,47 @@ def main():
         paperless_storage_path=args.paperless_storage_path
     )
     
-    downloader.run()
+    # Run once or on schedule
+    if schedule_seconds > 0:
+        # Scheduled mode: run continuously
+        logger = logging.getLogger(__name__)
+        logger.info("Starting scheduled mode. Container will run continuously.")
+        
+        run_count = 0
+        while not shutdown_requested:
+            run_count += 1
+            logger.info(f"Starting scheduled run #{run_count}")
+            
+            try:
+                downloader.run()
+            except Exception as e:
+                logger.error(f"Error during scheduled run: {str(e)}")
+                import traceback
+                traceback.print_exc()
+            
+            if shutdown_requested:
+                logger.info("Shutdown requested. Exiting...")
+                break
+            
+            # Wait for next run
+            logger.info(f"Waiting {args.schedule} until next run...")
+            elapsed = 0
+            while elapsed < schedule_seconds and not shutdown_requested:
+                time.sleep(min(60, schedule_seconds - elapsed))  # Sleep in 1-minute chunks
+                elapsed += min(60, schedule_seconds - elapsed)
+                if elapsed < schedule_seconds:
+                    remaining = schedule_seconds - elapsed
+                    hours = remaining // 3600
+                    minutes = (remaining % 3600) // 60
+                    if hours > 0:
+                        logger.debug(f"Next run in {hours}h {minutes}m")
+                    else:
+                        logger.debug(f"Next run in {minutes}m")
+        
+        logger.info("Scheduled mode stopped.")
+    else:
+        # One-time run
+        downloader.run()
 
 
 if __name__ == "__main__":

@@ -17,7 +17,12 @@ services:
       - ./invoices:/app/invoices
       # Mount data directory for database
       - ./data:/app/data
-    # Uncomment to run on a schedule (example: daily at 2 AM)
+    # Uncomment to run on a schedule (container runs continuously)
+    # Examples:
+    #   --schedule 24h  (run daily)
+    #   --schedule 12h  (run twice daily)
+    #   --schedule 1d   (run daily, same as 24h)
+    #   --schedule 7d   (run weekly)
     # command: >
     #   python amazon_invoice_downloader.py
     #   --email ${AMAZON_EMAIL}
@@ -27,6 +32,7 @@ services:
     #   --min-year 2025
     #   --paperless-url ${PAPERLESS_URL}
     #   --paperless-token ${PAPERLESS_TOKEN}
+    #   --schedule 24h
     networks:
       - default
 

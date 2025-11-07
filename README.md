@@ -109,6 +109,7 @@ python src/amazon_invoice_downloader.py \
 - `--paperless-document-type`: Paperless-ngx document type ID
 - `--paperless-tags`: Paperless-ngx tag IDs (can specify multiple)
 - `--paperless-storage-path`: Paperless-ngx storage path ID
+- `--schedule`: Run on a schedule (container runs continuously). Format: "1h" (hours) or "1d" (days). Examples: "24h" for daily, "12h" for twice daily, "7d" for weekly
 
 **Note:** Either `--output-folder` or `--paperless-url` and `--paperless-token` must be specified.
 
@@ -152,6 +153,28 @@ docker run --rm \
     --paperless-document-type 2 \
     --paperless-tags 3 4 5
 ```
+
+**With scheduled runs (container runs continuously):**
+```bash
+docker run -d \
+  --name amazon-invoice-downloader \
+  --restart unless-stopped \
+  -v $(pwd)/invoices:/app/invoices \
+  -v $(pwd)/data:/app/data \
+  ghcr.io/niclasku/amz_business_invoice_dl:latest \
+  python amazon_invoice_downloader.py \
+    --email YOUR_EMAIL \
+    --password YOUR_PASSWORD \
+    --output-folder /app/invoices \
+    --db-path /app/data/invoices.db \
+    --schedule 24h
+```
+
+The `--schedule` option accepts:
+- `1h`, `12h`, `24h` - Run every X hours
+- `1d`, `7d` - Run every X days
+
+The container will run continuously and execute the tool at the specified interval.
 
 ### Build the Image Locally
 
@@ -211,12 +234,24 @@ PAPERLESS_URL=https://paperless.example.com
 PAPERLESS_TOKEN=your_api_token
 ```
 
-2. Update `docker-compose.yml` to uncomment and customize the `command` section.
+2. Update `docker-compose.yml` to uncomment and customize the `command` section. Add `--schedule 24h` to run on a schedule.
 
 3. Run:
 ```bash
+# Run in foreground
 docker-compose up
+
+# Run in background (detached mode)
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop the container
+docker-compose down
 ```
+
+**Scheduled Mode:** When using `--schedule`, the container runs continuously and executes the tool at the specified interval. The container will automatically restart if it crashes (with `restart: unless-stopped`).
 
 ## Paperless-ngx Integration
 
