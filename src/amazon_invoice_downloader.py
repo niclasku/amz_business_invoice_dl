@@ -219,10 +219,23 @@ class AmazonInvoiceDownloader:
     
     def run(self) -> None:
         """Run the complete invoice download process."""
+        global shutdown_requested
         try:
+            # Check for shutdown before starting
+            if shutdown_requested:
+                self.logger.info("Shutdown requested before starting. Exiting...")
+                return
+                
             self.logger.info("Setting up Chrome driver...")
             self.driver = self.browser.setup_driver()
             self.wait = WebDriverWait(self.driver, 10)
+            
+            # Check for shutdown after driver setup
+            if shutdown_requested:
+                self.logger.info("Shutdown requested. Closing browser and exiting...")
+                if self.driver:
+                    self.driver.quit()
+                return
             
             # Initialize modules that need driver
             self.invoice_extractor = InvoiceExtractor(self.driver, self.wait)
@@ -248,20 +261,36 @@ class AmazonInvoiceDownloader:
             
             # Process each year sequentially
             for year in years_to_check:
+                # Check for shutdown before processing each year
+                if shutdown_requested:
+                    self.logger.info("Shutdown requested. Stopping immediately...")
+                    break
+                    
                 self.logger.info(f"Processing orders for year {year}...")
                 
                 # Navigate to order history for this year
                 self.browser.navigate_to_order_history(year)
                 
+                # Check for shutdown after navigation
+                if shutdown_requested:
+                    self.logger.info("Shutdown requested. Stopping immediately...")
+                    break
+                
                 # Process order cards for this year
                 self.process_order_cards()
+                
+                # Check for shutdown after processing
+                if shutdown_requested:
+                    self.logger.info("Shutdown requested. Stopping immediately...")
+                    break
                 
                 # Add a small delay between years
                 if len(years_to_check) > 1 and year != years_to_check[-1]:
                     self.logger.info(f"Finished processing year {year}, moving to next year...")
                     time.sleep(2)
             
-            self.logger.info("Finished processing all years")
+            if not shutdown_requested:
+                self.logger.info("Finished processing all years")
             
         except Exception as e:
             self.logger.error(f"An error occurred: {str(e)}")
@@ -302,22 +331,33 @@ def parse_schedule_interval(schedule_str: str) -> int:
     raise ValueError(f"Invalid schedule unit: {unit}. Use 'h' for hours or 'd' for days")
 
 
-# Global flag for graceful shutdown
+# Global flag for immediate shutdown
 shutdown_requested = False
+downloader_instance = None  # Reference to downloader instance for immediate shutdown
 
 
 def signal_handler(signum, frame):
-    """Handle shutdown signals gracefully."""
-    global shutdown_requested
+    """Handle shutdown signals - stop immediately."""
+    global shutdown_requested, downloader_instance
     shutdown_requested = True
-    logging.getLogger(__name__).info("Shutdown signal received. Finishing current run...")
+    logger = logging.getLogger(__name__)
+    logger.info("Shutdown signal received. Stopping immediately...")
+    
+    # Close browser immediately if it exists
+    if downloader_instance and downloader_instance.driver:
+        try:
+            logger.info("Closing browser immediately...")
+            downloader_instance.driver.quit()
+            downloader_instance.driver = None
+        except:
+            pass
 
 
 def main():
     """Main entry point."""
-    global shutdown_requested
+    global shutdown_requested, downloader_instance
     
-    # Set up signal handlers for graceful shutdown
+    # Set up signal handlers for immediate shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
@@ -369,6 +409,9 @@ def main():
         paperless_storage_path=args.paperless_storage_path
     )
     
+    # Store reference for signal handler
+    downloader_instance = downloader
+    
     # Run once or on schedule
     if schedule_seconds > 0:
         # Scheduled mode: run continuously
@@ -382,22 +425,38 @@ def main():
             
             try:
                 downloader.run()
+            except KeyboardInterrupt:
+                # Handle keyboard interrupt (Ctrl+C) immediately
+                logger.info("Interrupted. Stopping immediately...")
+                break
             except Exception as e:
                 logger.error(f"Error during scheduled run: {str(e)}")
                 import traceback
                 traceback.print_exc()
             
+            # Check for shutdown immediately after run
             if shutdown_requested:
-                logger.info("Shutdown requested. Exiting...")
+                logger.info("Shutdown requested. Exiting immediately...")
                 break
             
-            # Wait for next run
+            # Wait for next run - exit immediately if shutdown requested
+            if shutdown_requested:
+                logger.info("Shutdown requested during wait. Exiting immediately...")
+                break
+                
             logger.info(f"Waiting {args.schedule} until next run...")
             elapsed = 0
             while elapsed < schedule_seconds and not shutdown_requested:
-                time.sleep(min(60, schedule_seconds - elapsed))  # Sleep in 1-minute chunks
-                elapsed += min(60, schedule_seconds - elapsed)
-                if elapsed < schedule_seconds:
+                # Sleep in smaller chunks (10 seconds) for faster response to shutdown
+                sleep_time = min(10, schedule_seconds - elapsed)
+                time.sleep(sleep_time)
+                elapsed += sleep_time
+                
+                if shutdown_requested:
+                    logger.info("Shutdown requested during wait. Exiting immediately...")
+                    break
+                    
+                if elapsed < schedule_seconds and not shutdown_requested:
                     remaining = schedule_seconds - elapsed
                     hours = remaining // 3600
                     minutes = (remaining % 3600) // 60
@@ -409,7 +468,16 @@ def main():
         logger.info("Scheduled mode stopped.")
     else:
         # One-time run
-        downloader.run()
+        try:
+            downloader.run()
+        except KeyboardInterrupt:
+            logger = logging.getLogger(__name__)
+            logger.info("Interrupted. Stopping immediately...")
+            if downloader.driver:
+                try:
+                    downloader.driver.quit()
+                except:
+                    pass
 
 
 if __name__ == "__main__":
