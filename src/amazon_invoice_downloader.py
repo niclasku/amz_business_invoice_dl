@@ -153,12 +153,33 @@ class AmazonInvoiceDownloader:
                             else:
                                 filename = f"AMZ_{date_formatted}_{order_id_safe}.pdf"
                             
-                            self.logger.info(f"Downloading invoice: {inv['text']} -> {filename}")
-                            pdf_data = self.file_handler.download_invoice(inv['href'], filename, self.output_folder)
+                            # Track success status
+                            download_success = False
+                            paperless_success = False
                             
-                            if pdf_data:
-                                # Upload to paperless-ngx if configured
-                                if self.file_handler.paperless_url and self.file_handler.paperless_token:
+                            # Download invoice if output folder is configured
+                            pdf_data = None
+                            if self.output_folder:
+                                self.logger.info(f"Downloading invoice: {inv['text']} -> {filename}")
+                                pdf_data = self.file_handler.download_invoice(inv['href'], filename, self.output_folder)
+                                if pdf_data:
+                                    download_success = True
+                                    self.logger.info(f"Successfully downloaded: {filename}")
+                                else:
+                                    self.logger.error(f"Failed to download: {filename}")
+                            else:
+                                # If only paperless is configured, download to memory only
+                                self.logger.info(f"Downloading invoice for paperless upload: {inv['text']} -> {filename}")
+                                pdf_data = self.file_handler.download_invoice(inv['href'], filename, None)
+                                if pdf_data:
+                                    download_success = True  # Download succeeded (to memory)
+                                    self.logger.info(f"Successfully downloaded to memory: {filename}")
+                                else:
+                                    self.logger.error(f"Failed to download: {filename}")
+                            
+                            # Upload to paperless-ngx if configured
+                            if self.file_handler.paperless_url and self.file_handler.paperless_token:
+                                if pdf_data:
                                     # Parse order date for paperless created field
                                     order_date = self.order_parser.parse_order_date(order_info['date'])
                                     title = f"Amazon Invoice {order_info['order_id']} - {order_info['date']}"
@@ -169,15 +190,51 @@ class AmazonInvoiceDownloader:
                                         created=order_date
                                     )
                                     if task_uuid:
-                                        self.logger.info(f"Uploaded to paperless-ngx: {filename}")
+                                        paperless_success = True
+                                        self.logger.info(f"Successfully uploaded to paperless-ngx: {filename}")
                                     else:
                                         self.logger.warning(f"Failed to upload to paperless-ngx: {filename}")
-                                
-                                # Mark as downloaded in database
-                                self.database.mark_invoice_downloaded(inv['href'], order_info['order_id'], filename)
-                                self.logger.info(f"Successfully processed: {filename}")
+                                else:
+                                    self.logger.warning(f"Cannot upload to paperless-ngx: download failed for {filename}")
+                            
+                            # Determine if invoice should be marked as complete based on configuration
+                            should_mark_complete = False
+                            
+                            if self.output_folder and (self.file_handler.paperless_url and self.file_handler.paperless_token):
+                                # Both methods configured: both must succeed
+                                should_mark_complete = download_success and paperless_success
+                                if should_mark_complete:
+                                    self.logger.info(f"Successfully processed (both download and paperless): {filename}")
+                                else:
+                                    self.logger.warning(f"Incomplete processing for {filename}: download={download_success}, paperless={paperless_success}")
+                            elif self.file_handler.paperless_url and self.file_handler.paperless_token:
+                                # Only paperless configured: paperless must succeed
+                                should_mark_complete = paperless_success
+                                if should_mark_complete:
+                                    self.logger.info(f"Successfully processed (paperless): {filename}")
+                                else:
+                                    self.logger.warning(f"Incomplete processing for {filename}: paperless upload failed")
+                            elif self.output_folder:
+                                # Only local download configured: download must succeed
+                                should_mark_complete = download_success
+                                if should_mark_complete:
+                                    self.logger.info(f"Successfully processed (local download): {filename}")
+                                else:
+                                    self.logger.warning(f"Incomplete processing for {filename}: download failed")
+                            
+                            # Mark invoice in database with appropriate status
+                            if should_mark_complete:
+                                # Mark as downloaded with paperless status
+                                self.database.mark_invoice_downloaded(
+                                    inv['href'], 
+                                    order_info['order_id'], 
+                                    filename if self.output_folder else None,
+                                    paperless_uploaded=paperless_success
+                                )
+                                self.logger.info(f"Marked as complete in database: {filename}")
                             else:
-                                self.logger.error(f"Failed to download: {filename}")
+                                # Don't mark as complete, but log the status
+                                self.logger.warning(f"Not marking as complete in database due to failed requirements: {filename}")
                     
                     # Mark order as processed with updated invoice count
                     self.database.mark_order_processed(

@@ -48,9 +48,19 @@ class Database:
                 order_id TEXT,
                 filename TEXT,
                 downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                paperless_uploaded_at TIMESTAMP,
                 FOREIGN KEY (order_id) REFERENCES orders(order_id)
             )
         ''')
+        
+        # Add paperless_uploaded_at column if it doesn't exist (for existing databases)
+        try:
+            cursor.execute('PRAGMA table_info(invoices)')
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'paperless_uploaded_at' not in columns:
+                cursor.execute('ALTER TABLE invoices ADD COLUMN paperless_uploaded_at TIMESTAMP')
+        except sqlite3.OperationalError:
+            pass
         
         # Migrate existing data: check if we need to migrate from old schema
         try:
@@ -223,8 +233,16 @@ class Database:
         conn.commit()
         conn.close()
     
-    def mark_invoice_downloaded(self, invoice_url: str, order_id: str, filename: str) -> None:
-        """Mark an invoice as downloaded."""
+    def mark_invoice_downloaded(self, invoice_url: str, order_id: str, filename: Optional[str] = None, 
+                                paperless_uploaded: bool = False) -> None:
+        """Mark an invoice as downloaded and optionally as uploaded to paperless.
+        
+        Args:
+            invoice_url: Invoice URL
+            order_id: Order ID
+            filename: Filename if downloaded locally (None if only uploaded to paperless)
+            paperless_uploaded: True if successfully uploaded to paperless
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
         
@@ -236,42 +254,102 @@ class Database:
         
         if pk_column == 'invoice_uuid' and invoice_uuid:
             # New schema: use invoice_uuid as primary key
-            cursor.execute('''
-                INSERT OR REPLACE INTO invoices (invoice_uuid, invoice_url, invoice_hash, order_id, filename, downloaded_at)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ''', (invoice_uuid, invoice_url, invoice_hash, order_id, filename))
+            if paperless_uploaded:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO invoices (invoice_uuid, invoice_url, invoice_hash, order_id, filename, downloaded_at, paperless_uploaded_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ''', (invoice_uuid, invoice_url, invoice_hash, order_id, filename))
+            else:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO invoices (invoice_uuid, invoice_url, invoice_hash, order_id, filename, downloaded_at, paperless_uploaded_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL)
+                ''', (invoice_uuid, invoice_url, invoice_hash, order_id, filename))
         elif pk_column == 'invoice_url':
             # Old schema: use invoice_url as primary key
             if invoice_uuid:
-                cursor.execute('''
-                    INSERT OR REPLACE INTO invoices (invoice_url, invoice_uuid, invoice_hash, order_id, filename, downloaded_at)
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (invoice_url, invoice_uuid, invoice_hash, order_id, filename))
+                if paperless_uploaded:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO invoices (invoice_url, invoice_uuid, invoice_hash, order_id, filename, downloaded_at, paperless_uploaded_at)
+                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ''', (invoice_url, invoice_uuid, invoice_hash, order_id, filename))
+                else:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO invoices (invoice_url, invoice_uuid, invoice_hash, order_id, filename, downloaded_at, paperless_uploaded_at)
+                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL)
+                    ''', (invoice_url, invoice_uuid, invoice_hash, order_id, filename))
             else:
-                cursor.execute('''
-                    INSERT OR REPLACE INTO invoices (invoice_url, invoice_hash, order_id, filename, downloaded_at)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (invoice_url, invoice_hash, order_id, filename))
+                if paperless_uploaded:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO invoices (invoice_url, invoice_hash, order_id, filename, downloaded_at, paperless_uploaded_at)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ''', (invoice_url, invoice_hash, order_id, filename))
+                else:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO invoices (invoice_url, invoice_hash, order_id, filename, downloaded_at, paperless_uploaded_at)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, NULL)
+                    ''', (invoice_url, invoice_hash, order_id, filename))
         else:
             # Fallback: try with invoice_uuid first
             if invoice_uuid:
                 try:
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO invoices (invoice_uuid, invoice_url, invoice_hash, order_id, filename, downloaded_at)
-                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ''', (invoice_uuid, invoice_url, invoice_hash, order_id, filename))
+                    if paperless_uploaded:
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO invoices (invoice_uuid, invoice_url, invoice_hash, order_id, filename, downloaded_at, paperless_uploaded_at)
+                            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ''', (invoice_uuid, invoice_url, invoice_hash, order_id, filename))
+                    else:
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO invoices (invoice_uuid, invoice_url, invoice_hash, order_id, filename, downloaded_at, paperless_uploaded_at)
+                            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL)
+                        ''', (invoice_uuid, invoice_url, invoice_hash, order_id, filename))
                 except sqlite3.OperationalError:
                     # If that fails, try with invoice_url
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO invoices (invoice_url, invoice_uuid, invoice_hash, order_id, filename, downloaded_at)
-                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ''', (invoice_url, invoice_uuid, invoice_hash, order_id, filename))
+                    if paperless_uploaded:
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO invoices (invoice_url, invoice_uuid, invoice_hash, order_id, filename, downloaded_at, paperless_uploaded_at)
+                            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ''', (invoice_url, invoice_uuid, invoice_hash, order_id, filename))
+                    else:
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO invoices (invoice_url, invoice_uuid, invoice_hash, order_id, filename, downloaded_at, paperless_uploaded_at)
+                            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, NULL)
+                        ''', (invoice_url, invoice_uuid, invoice_hash, order_id, filename))
             else:
                 # No UUID available, use URL
-                cursor.execute('''
-                    INSERT OR REPLACE INTO invoices (invoice_url, invoice_hash, order_id, filename, downloaded_at)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (invoice_url, invoice_hash, order_id, filename))
+                if paperless_uploaded:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO invoices (invoice_url, invoice_hash, order_id, filename, downloaded_at, paperless_uploaded_at)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ''', (invoice_url, invoice_hash, order_id, filename))
+                else:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO invoices (invoice_url, invoice_hash, order_id, filename, downloaded_at, paperless_uploaded_at)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, NULL)
+                    ''', (invoice_url, invoice_hash, order_id, filename))
+        
+        conn.commit()
+        conn.close()
+    
+    def mark_paperless_uploaded(self, invoice_url: str) -> None:
+        """Mark an invoice as successfully uploaded to paperless."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        invoice_uuid = extract_uuid_from_url(invoice_url)
+        
+        # Determine primary key column
+        pk_column = self._get_invoice_primary_key(cursor)
+        
+        if pk_column == 'invoice_uuid' and invoice_uuid:
+            cursor.execute('''
+                UPDATE invoices SET paperless_uploaded_at = CURRENT_TIMESTAMP
+                WHERE invoice_uuid = ?
+            ''', (invoice_uuid,))
+        else:
+            cursor.execute('''
+                UPDATE invoices SET paperless_uploaded_at = CURRENT_TIMESTAMP
+                WHERE invoice_url = ?
+            ''', (invoice_url,))
         
         conn.commit()
         conn.close()
