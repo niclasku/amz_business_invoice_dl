@@ -1,42 +1,18 @@
-version: '3.8'
-
 services:
   amazon-invoice-downloader:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     image: amazon-invoice-downloader:latest
     container_name: amazon-invoice-downloader
     restart: unless-stopped
+    init: true
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file: ${ENV_FILE:-.env}
     environment:
-      # These will be passed as arguments to the script
-      - AMAZON_EMAIL=${AMAZON_EMAIL}
-      - AMAZON_PASSWORD=${AMAZON_PASSWORD}
+      # Container paths are fixed here; customize all other settings in .env.
+      OUTPUT_FOLDER: /app/invoices
+      DB_PATH: /app/data/invoices.db
+      CHROME_HEADLESS: "true"
     volumes:
-      # Mount invoices directory to persist downloaded files
       - ./invoices:/app/invoices
-      # Mount data directory for database
       - ./data:/app/data
-    # Uncomment to run on a schedule (container runs continuously)
-    # Examples:
-    #   --schedule 24h  (run daily)
-    #   --schedule 12h  (run twice daily)
-    #   --schedule 1d   (run daily, same as 24h)
-    #   --schedule 7d   (run weekly)
-    # command: >
-    #   python amazon_invoice_downloader.py
-    #   --email ${AMAZON_EMAIL}
-    #   --password ${AMAZON_PASSWORD}
-    #   --output-folder /app/invoices
-    #   --db-path /app/data/invoices.db
-    #   --min-year 2025
-    #   --paperless-url ${PAPERLESS_URL}
-    #   --paperless-token ${PAPERLESS_TOKEN}
-    #   --schedule 24h
-    networks:
-      - default
-
-networks:
-  default:
-    driver: bridge
-
+    shm_size: 1gb

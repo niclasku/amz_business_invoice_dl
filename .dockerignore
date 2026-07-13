@@ -16,4 +16,7 @@ build/
 invoices/
 *.db
 data/
-
+.env
+.env.*
+log*.txt
+amazon-debug-*
