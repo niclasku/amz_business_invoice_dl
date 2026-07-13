@@ -1,312 +1,253 @@
 # Amazon Business Invoice Downloader
 
-Automated tool to download invoices from Amazon Business and optionally upload them to paperless-ngx.
+Downloads actual invoices from Amazon Business, remembers completed downloads in
+SQLite, and can optionally upload PDFs to Paperless-ngx. It supports Amazon email
+OTP challenges, scheduled runs, and email alerts when a run fails.
 
-## Features
+## What it does
 
-- Automatically downloads invoices from Amazon Business account
-- Tracks downloaded invoices in SQLite database to avoid duplicates
-- Supports year-based filtering
-- Handles year transitions automatically (checks both previous and current year during first 8 weeks)
-- Optional integration with paperless-ngx for document management
-- Can save invoices locally and/or upload to paperless-ngx
-- Runs in headless mode (no GUI required)
+- Downloads invoices without downloading order summaries (`Bestellübersicht`)
+- Avoids duplicate downloads with a persistent SQLite database
+- Checks only orders inside a configurable rolling lookback window
+- Follows order-history pagination until the entire window is covered
+- Retrieves fresh Amazon verification codes from a dedicated IMAP mailbox
+- Verifies a known invoice PDF and SHA-256 hash on every run
+- Sends an SMTP alert for login, OTP, extraction, download, hash, or upload errors
+- Saves locally, uploads to Paperless-ngx, or does both
 
-## Requirements
+## Recommended setup: Docker Compose
 
-- Python 3.11+
-- Chrome/Chromium browser
-- ChromeDriver (automatically managed by Selenium 4.x)
+Requirements: Docker with the Compose plugin and a dedicated email mailbox for
+OTP messages. The included example uses STRATO's mail servers.
 
-## Installation
+1. Create the configuration file:
 
-### Local Installation
+   ```bash
+   cp .env.example .env
+   ```
 
-1. Clone this repository:
+2. Edit `.env`. At minimum, set:
+
+   ```dotenv
+   AMAZON_EMAIL=your-amazon-account@example.com
+   AMAZON_PASSWORD=your-amazon-password
+
+   MAIL_USERNAME=amazon@example.com
+   MAIL_PASSWORD=your-mailbox-password
+   MAIL_NOTIFICATION_TO=your-alert-address@example.com
+   ```
+
+3. Create the persistent directories. On Linux or a NAS, set `PUID` and
+   `PGID` in `.env` to the user that owns these directories (`id -u` and
+   `id -g` print the appropriate values):
+
+   ```bash
+   mkdir -p invoices data
+   ```
+
+4. Build and start:
+
+   ```bash
+   docker compose up -d --build
+   docker compose logs -f
+   ```
+
+Compose reads `.env` by default. For testing another file without renaming it,
+run `ENV_FILE=.env.testing docker compose up`.
+
+Invoices are written to `./invoices` and the database to
+`./data/invoices.db`. Both survive container replacement.
+
+Useful commands:
+
 ```bash
-git clone <repository-url>
-cd amz_business_invoice_dl
+docker compose logs -f                    # follow logs
+docker compose run --rm -e SCHEDULE= amazon-invoice-downloader  # run once
+docker compose down                       # stop scheduled operation
 ```
 
-2. (Optional) Create a virtual environment:
+To run once, set `SCHEDULE=` in `.env`. For daily operation use
+`SCHEDULE=24h`; other supported examples are `12h`, `1d`, and `7d`.
+
+> `CLEAR_OTP_INBOX=true` permanently deletes every message in the configured
+> IMAP folder before login. Only enable it for a dedicated mailbox.
+
+## Configuration
+
+The application accepts environment variables and equivalent command-line
+options. A supplied CLI option overrides its environment variable.
+
+### Core settings
+
+| Environment variable | CLI option | Required / default |
+|---|---|---|
+| `AMAZON_EMAIL` | `--email` | Required |
+| `AMAZON_PASSWORD` | `--password` | Required |
+| `LOOKBACK_DAYS` | `--lookback-days` | `56` |
+| `OUTPUT_FOLDER` | `--output-folder` | Required unless Paperless is configured |
+| `DB_PATH` | `--db-path` | `invoices.db` |
+| `LOG_LEVEL` | `--log-level` | `INFO` |
+| `SCHEDULE` | `--schedule` | Empty: run once |
+| `CLEAR_OTP_INBOX` | `--clear-otp-inbox` | `false` |
+| `CHROME_HEADLESS` | — | `true` |
+| `PUID` / `PGID` | — | `1000` (Docker Compose only) |
+
+Set `CHROME_HEADLESS=false` only when you want to inspect a visible local
+browser. Local and Docker runs are headless by default.
+
+### Debugging authentication
+
+Normal logs do not contain page HTML or full URLs. To investigate a failed
+headless login, enable debug logging for one run:
+
+```bash
+python src/amazon_invoice_downloader.py --log-level DEBUG ... 2>&1 | tee log.txt
+```
+
+Or set `LOG_LEVEL=DEBUG` in `.env`. When Selenium times out, the log includes
+the URL path without its query string, browser state, input metadata, and the
+current HTML source. The configured Amazon password is redacted, but Amazon's
+HTML can still contain email addresses, session identifiers, and security
+tokens. Treat a debug log as sensitive and return to `INFO` afterwards.
+Third-party protocol loggers remain at `WARNING` even in debug mode so raw
+WebDriver responses and authentication cookies are never intentionally logged.
+
+### OTP mailbox and alerts
+
+The same mailbox credentials can be shared between IMAP and SMTP:
+
+```dotenv
+MAIL_USERNAME=amazon@example.com
+MAIL_PASSWORD=your-mailbox-password
+
+MAIL_IMAP_HOST=imap.strato.de
+MAIL_IMAP_PORT=993
+MAIL_IMAP_FOLDER=INBOX
+AMAZON_OTP_TIMEOUT=120
+AMAZON_OTP_POLL_INTERVAL=5
+
+MAIL_SMTP_HOST=smtp.strato.de
+MAIL_SMTP_PORT=465
+MAIL_NOTIFICATION_TO=your-alert-address@example.com
+```
+
+You may instead provide separate `MAIL_IMAP_USERNAME`, `MAIL_IMAP_PASSWORD`,
+`MAIL_SMTP_USERNAME`, and `MAIL_SMTP_PASSWORD` values. The notification sender
+defaults to the SMTP username and can be overridden with
+`MAIL_NOTIFICATION_FROM`.
+
+Only fresh messages from Amazon's expected sender and sign-in subject are used
+for OTP extraction. Normal logs do not contain passwords, OTPs, page HTML,
+screenshots, or full authentication URLs.
+
+### Paperless-ngx (optional)
+
+```dotenv
+PAPERLESS_URL=https://paperless.example.com
+PAPERLESS_TOKEN=your-api-token
+PAPERLESS_CORRESPONDENT=1
+PAPERLESS_DOCUMENT_TYPE=2
+PAPERLESS_TAGS=3,4,5
+PAPERLESS_STORAGE_PATH=1
+```
+
+Only `PAPERLESS_URL` and `PAPERLESS_TOKEN` are required for upload. If
+`OUTPUT_FOLDER` is also configured, every invoice must succeed both locally and
+in Paperless before it is marked complete.
+
+## Local Python setup
+
+Requirements: Python 3.11+ and Chrome or Chromium.
+
 ```bash
 python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-3. Install dependencies:
-```bash
+source venv/bin/activate
 pip install -r src/requirements.txt
 ```
 
-4. Install Chrome/Chromium browser (if not already installed):
-   - **macOS**: `brew install --cask google-chrome` or `brew install chromium`
-   - **Linux**: `sudo apt-get install chromium-browser` or `sudo apt-get install chromium`
-   - **Windows**: Download from [Google Chrome](https://www.google.com/chrome/)
+You can export environment variables or use CLI options:
 
-5. Run the script:
 ```bash
 python src/amazon_invoice_downloader.py \
-  --email your.email@example.com \
-  --password your_password \
+  --email your-amazon-account@example.com \
+  --password 'your-password' \
   --output-folder ./invoices \
   --db-path ./invoices.db
 ```
 
-**Note:** ChromeDriver is automatically managed by Selenium 4.x, so you don't need to install it separately.
+See all options with:
 
-## Usage
-
-### Basic Usage
-
-Download invoices to a local folder:
 ```bash
-python src/amazon_invoice_downloader.py \
-  --email your.email@example.com \
-  --password your_password \
-  --output-folder ./invoices \
-  --db-path ./invoices.db
+python src/amazon_invoice_downloader.py --help
 ```
 
-### With Paperless-ngx
+Selenium manages the matching ChromeDriver automatically for local runs. The
+Docker image includes Chromium and ChromeDriver.
 
-Upload invoices directly to paperless-ngx:
+## Rolling window and health check
+
+`LOOKBACK_DAYS` controls the complete processing range. The downloader derives
+the required calendar years, follows pagination, skips orders before the cutoff,
+and performs no separate backfill. SQLite deduplication prevents repeated
+downloads inside overlapping runs. Amazon document UUIDs can rotate, so invoice
+completion is matched by order and invoice label/position rather than assuming
+the download URL is permanent.
+
+The health check is automatic and has no sentinel-specific settings. SQLite
+stores an active sentinel's order ID, date, invoice position, label, last
+observed URL, and SHA-256 hash. Every run rediscovers the order and extracts its
+current invoice URL rather than assuming Amazon's document UUID is permanent.
+
+Before the active sentinel leaves the lookback window, the downloader creates a
+new candidate from a stable recent invoice. The candidate must pass verification
+on a later run before it replaces the active sentinel. This overlap prevents a
+broken extractor from silently creating its own successful baseline. On a new
+installation, the first suitable run creates a candidate and a subsequent run
+activates it. Hash baselines are never silently updated after creation.
+
+A failed health check or another fatal processing error:
+
+1. writes the error and traceback to the log;
+2. sends one email when SMTP is configured; and
+3. makes a one-time run exit non-zero.
+
+If no active sentinel exists and no invoice can be extracted to establish one,
+the run fails instead of silently operating without health coverage. A brand-new
+account whose only invoices are too recent for a stable baseline logs a temporary
+warning until one becomes eligible.
+
+## Tests
+
 ```bash
-python src/amazon_invoice_downloader.py \
-  --email your.email@example.com \
-  --password your_password \
-  --db-path ./invoices.db \
-  --paperless-url https://paperless.example.com \
-  --paperless-token your_api_token \
-  --paperless-correspondent 1 \
-  --paperless-document-type 2 \
-  --paperless-tags 3 4 5
+PYTHONPATH=src python -m unittest discover -s tests -v
+python -m compileall -q src tests
 ```
 
-### Combined (Local + Paperless-ngx)
+The image publishing workflow runs both checks before building or pushing an
+image.
 
-Save locally AND upload to paperless-ngx:
-```bash
-python src/amazon_invoice_downloader.py \
-  --email your.email@example.com \
-  --password your_password \
-  --output-folder ./invoices \
-  --db-path ./invoices.db \
-  --paperless-url https://paperless.example.com \
-  --paperless-token your_api_token
-```
+## Build the image manually
 
-### Command Line Arguments
-
-- `--email`: Amazon account email (required)
-- `--password`: Amazon account password (required)
-- `--min-year`: Minimum year to download invoices from (e.g., 2020)
-- `--output-folder`: Folder to save downloaded invoices (optional if using paperless-ngx)
-- `--db-path`: Path to SQLite database file (default: invoices.db)
-- `--paperless-url`: Paperless-ngx instance URL
-- `--paperless-token`: Paperless-ngx API token
-- `--paperless-correspondent`: Paperless-ngx correspondent ID
-- `--paperless-document-type`: Paperless-ngx document type ID
-- `--paperless-tags`: Paperless-ngx tag IDs (can specify multiple)
-- `--paperless-storage-path`: Paperless-ngx storage path ID
-- `--schedule`: Run on a schedule (container runs continuously). Format: "1h" (hours) or "1d" (days). Examples: "24h" for daily, "12h" for twice daily, "7d" for weekly
-
-**Note:** Either `--output-folder` or `--paperless-url` and `--paperless-token` must be specified.
-
-## Docker Usage
-
-### Using Pre-built Image from GitHub Container Registry
-
-The Docker image is automatically built and pushed to GitHub Container Registry (ghcr.io) on every push to the main branch.
-
-**Pull and run the image:**
-```bash
-docker pull ghcr.io/niclasku/amz_business_invoice_dl:latest
-```
-
-**With local storage:**
-```bash
-docker run --rm \
-  -v $(pwd)/invoices:/app/invoices \
-  -v $(pwd)/data:/app/data \
-  ghcr.io/niclasku/amz_business_invoice_dl:latest \
-  python amazon_invoice_downloader.py \
-    --email YOUR_EMAIL \
-    --password YOUR_PASSWORD \
-    --output-folder /app/invoices \
-    --db-path /app/data/invoices.db \
-    --min-year 2025
-```
-
-**With paperless-ngx upload:**
-```bash
-docker run --rm \
-  -v $(pwd)/data:/app/data \
-  ghcr.io/niclasku/amz_business_invoice_dl:latest \
-  python amazon_invoice_downloader.py \
-    --email YOUR_EMAIL \
-    --password YOUR_PASSWORD \
-    --db-path /app/data/invoices.db \
-    --paperless-url https://paperless.example.com \
-    --paperless-token YOUR_API_TOKEN \
-    --paperless-correspondent 1 \
-    --paperless-document-type 2 \
-    --paperless-tags 3 4 5
-```
-
-**With scheduled runs (container runs continuously):**
-```bash
-docker run -d \
-  --name amazon-invoice-downloader \
-  --restart unless-stopped \
-  -v $(pwd)/invoices:/app/invoices \
-  -v $(pwd)/data:/app/data \
-  ghcr.io/niclasku/amz_business_invoice_dl:latest \
-  python amazon_invoice_downloader.py \
-    --email YOUR_EMAIL \
-    --password YOUR_PASSWORD \
-    --output-folder /app/invoices \
-    --db-path /app/data/invoices.db \
-    --schedule 24h
-```
-
-The `--schedule` option accepts:
-- `1h`, `12h`, `24h` - Run every X hours
-- `1d`, `7d` - Run every X days
-
-The container will run continuously and execute the tool at the specified interval.
-
-### Build the Image Locally
-
-For your architecture (Docker will auto-detect):
 ```bash
 docker build -t amazon-invoice-downloader:latest .
 ```
 
-For specific architecture:
-```bash
-# For x86_64 (Synology NAS)
-docker build --platform linux/amd64 -t amazon-invoice-downloader:latest .
+Docker automatically selects the host architecture. To build explicitly for a
+NAS or another host, add `--platform linux/amd64` or `--platform linux/arm64`.
 
-# For ARM64 (M2 Mac)
-docker build --platform linux/arm64 -t amazon-invoice-downloader:latest .
+## Project layout
+
+```text
+src/amazon_invoice_downloader.py  Main workflow and configuration
+src/browser.py                    Chrome login, OTP, and navigation
+src/mail_client.py                IMAP OTP retrieval and SMTP alerts
+src/invoice_extractor.py          Invoice-only link extraction
+src/file_handler.py               PDF download and Paperless upload
+src/database.py                   SQLite persistence and sentinel hashes
+docker-compose.yml                Ready-to-run container service
+.env.example                      Configuration template
 ```
-
-### Run with Docker (Local Build)
-
-**With local storage:**
-```bash
-docker run --rm \
-  -v $(pwd)/invoices:/app/invoices \
-  -v $(pwd)/data:/app/data \
-  amazon-invoice-downloader:latest \
-  python amazon_invoice_downloader.py \
-    --email YOUR_EMAIL \
-    --password YOUR_PASSWORD \
-    --output-folder /app/invoices \
-    --db-path /app/data/invoices.db \
-    --min-year 2025
-```
-
-**With paperless-ngx upload:**
-```bash
-docker run --rm \
-  -v $(pwd)/data:/app/data \
-  amazon-invoice-downloader:latest \
-  python amazon_invoice_downloader.py \
-    --email YOUR_EMAIL \
-    --password YOUR_PASSWORD \
-    --db-path /app/data/invoices.db \
-    --paperless-url https://paperless.example.com \
-    --paperless-token YOUR_API_TOKEN \
-    --paperless-correspondent 1 \
-    --paperless-document-type 2 \
-    --paperless-tags 3 4 5
-```
-
-### Docker Compose
-
-1. Create a `.env` file:
-```bash
-AMAZON_EMAIL=your.email@example.com
-AMAZON_PASSWORD=your_password
-PAPERLESS_URL=https://paperless.example.com
-PAPERLESS_TOKEN=your_api_token
-```
-
-2. Update `docker-compose.yml` to uncomment and customize the `command` section. Add `--schedule 24h` to run on a schedule.
-
-3. Run:
-```bash
-# Run in foreground
-docker-compose up
-
-# Run in background (detached mode)
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Stop the container
-docker-compose down
-```
-
-**Scheduled Mode:** When using `--schedule`, the container runs continuously and executes the tool at the specified interval. The container will automatically restart if it crashes (with `restart: unless-stopped`).
-
-## Paperless-ngx Integration
-
-### Getting Your API Token
-
-1. Log in to your paperless-ngx instance
-2. Go to **Settings** → **API Tokens**
-3. Create a new API token
-4. Copy the token for use in the script
-
-### Finding IDs
-
-You can find correspondent, document type, tag, and storage path IDs by:
-- Using the paperless-ngx web interface and checking the URL when viewing an item
-- Using the API: `GET /api/correspondents/`, `/api/document_types/`, `/api/tags/`, `/api/storage_paths/`
-- Using curl: `curl -H "Authorization: Token YOUR_TOKEN" https://paperless.example.com/api/correspondents/`
-
-## Project Structure
-
-```
-.
-├── src/
-│   ├── amazon_invoice_downloader.py  # Main orchestrator
-│   ├── database.py                    # Database operations
-│   ├── browser.py                     # WebDriver and navigation
-│   ├── order_parser.py                # Order information extraction
-│   ├── invoice_extractor.py           # Invoice link extraction
-│   ├── file_handler.py                # File download/upload operations
-│   └── requirements.txt               # Python dependencies
-├── Dockerfile
-├── docker-compose.yml
-└── README.md
-```
-
-## How It Works
-
-1. Logs into Amazon Business account
-2. Navigates to order history (optionally filtered by year)
-3. For each order:
-   - Extracts order information (ID, date, price)
-   - Finds and clicks "Rechnung" (invoice) link
-   - Extracts invoice links from popover
-   - Downloads only new invoices (tracks count per order)
-   - Optionally uploads to paperless-ngx
-   - Marks invoices as downloaded in database
-
-## Year Transition Handling
-
-During the first 8 weeks of a new year, the script automatically checks both the previous and current year to catch any late invoices. After 8 weeks, it only checks the current year.
 
 ## License
 
-[Add your license here]
-
-## Contributing
-
-[Add contribution guidelines here]
-
+[GNU General Public License v3.0](LICENSE)
