@@ -2,7 +2,9 @@
 import os
 import re
 import hashlib
+import base64
 import urllib.request
+from urllib.parse import urljoin
 import requests
 import logging
 from typing import Optional
@@ -64,6 +66,49 @@ class FileHandler:
         self.paperless_tags = paperless_tags or []
         self.paperless_storage_path = paperless_storage_path
     
+    def _download_with_browser(self, invoice_url: str) -> Optional[bytes]:
+        """Download through the authenticated browser when direct HTTP is rejected."""
+        result = self.driver.execute_async_script(
+            """
+            const url = arguments[0];
+            const done = arguments[arguments.length - 1];
+            fetch(url, {credentials: 'include'})
+                .then(async response => {
+                    const bytes = new Uint8Array(await response.arrayBuffer());
+                    let binary = '';
+                    const chunkSize = 32768;
+                    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+                        binary += String.fromCharCode.apply(
+                            null, bytes.subarray(offset, offset + chunkSize)
+                        );
+                    }
+                    done({
+                        ok: response.ok,
+                        status: response.status,
+                        contentType: response.headers.get('content-type') || '',
+                        data: btoa(binary)
+                    });
+                })
+                .catch(error => done({error: String(error)}));
+            """,
+            invoice_url,
+        )
+        if not result or result.get("error"):
+            logger.error(
+                "Authenticated browser download failed: %s",
+                result.get("error", "no response") if result else "no response",
+            )
+            return None
+
+        logger.debug(
+            "Authenticated browser download response: status=%s, content_type=%r",
+            result.get("status"),
+            result.get("contentType"),
+        )
+        if not result.get("ok") or not result.get("data"):
+            return None
+        return base64.b64decode(result["data"])
+
     def download_invoice(self, invoice_url: str, filename: str, output_folder: Optional[str] = None) -> Optional[bytes]:
         """Download a single invoice PDF and return the file data.
         
@@ -71,24 +116,45 @@ class FileHandler:
             bytes: PDF file data if successful, None otherwise
         """
         try:
-            # Get cookies from selenium session
-            cookies = self.driver.get_cookies()
-            
-            # Convert relative URL to absolute if needed
-            if invoice_url.startswith('/'):
-                invoice_url = f"https://www.amazon.de{invoice_url}"
-            
-            # Build cookie header string
-            cookie_header = '; '.join([f"{cookie['name']}={cookie['value']}" for cookie in cookies])
-            
-            # Create request with cookies and user agent
-            req = urllib.request.Request(invoice_url)
-            req.add_header('Cookie', cookie_header)
-            req.add_header('User-Agent', self.driver.execute_script("return navigator.userAgent;"))
-            
-            # Download the PDF
-            with urllib.request.urlopen(req) as response:
-                pdf_data = response.read()
+            invoice_url = urljoin("https://www.amazon.de", invoice_url)
+            pdf_data = None
+
+            try:
+                cookies = self.driver.get_cookies()
+                cookie_header = '; '.join(
+                    f"{cookie['name']}={cookie['value']}" for cookie in cookies
+                )
+                req = urllib.request.Request(invoice_url)
+                req.add_header('Cookie', cookie_header)
+                req.add_header(
+                    'User-Agent',
+                    self.driver.execute_script("return navigator.userAgent;"),
+                )
+                req.add_header(
+                    'Accept',
+                    'application/pdf,application/octet-stream;q=0.9,*/*;q=0.8',
+                )
+                req.add_header('Referer', self.driver.current_url)
+                with urllib.request.urlopen(req, timeout=60) as response:
+                    pdf_data = response.read()
+            except Exception as direct_error:
+                logger.warning(
+                    "Direct invoice request failed; retrying through the "
+                    "authenticated browser: %s",
+                    direct_error,
+                )
+
+            if not pdf_data or not pdf_data.startswith(b'%PDF-'):
+                if pdf_data is not None:
+                    logger.warning(
+                        "Direct invoice request returned non-PDF content; "
+                        "retrying through the authenticated browser"
+                    )
+                pdf_data = self._download_with_browser(invoice_url)
+
+            if not pdf_data or not pdf_data.startswith(b'%PDF-'):
+                logger.error("Invoice endpoint did not return a PDF for %s", filename)
+                return None
             
             # Save to file if output folder is specified
             if output_folder:
@@ -170,4 +236,3 @@ class FileHandler:
         except Exception as e:
             logger.error(f"Error uploading {filename} to paperless-ngx: {str(e)}")
             return None
-
