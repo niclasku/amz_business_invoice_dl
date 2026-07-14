@@ -250,7 +250,9 @@ class Browser:
         ):
             continue_button = self._wait_for_interactable(
                 By.CSS_SELECTOR,
-                "input#continue, input[name='continue'], button[name='continue']",
+                "input#continue, #continue input[type='submit'], "
+                "input[name='continue'], button[name='continue'], "
+                "input[aria-labelledby='continue-announce']",
             )
             continue_button.click()
 
@@ -505,6 +507,14 @@ class Browser:
     def navigate_to_order_history(self, year: Optional[int] = None,
                                   page: int = 1) -> None:
         """Navigate to the order history page, optionally filtered by year."""
+        # Amazon switches years through client-side hash routing. The existing
+        # document and order cards can remain visible briefly after ``get``
+        # returns, especially on slower container hosts. Remember one current
+        # card so we can wait for that render to be replaced before callers
+        # collect the new page's cards.
+        previous_cards = self.driver.find_elements(By.ID, "orderCard")
+        previous_first_card = previous_cards[0] if previous_cards else None
+
         if year:
             order_history_url = (
                 "https://www.amazon.de/gp/css/order-history"
@@ -537,6 +547,27 @@ class Browser:
             raise RuntimeError(
                 "Amazon requires an unsupported additional authentication step"
             )
+
+        if previous_first_card:
+            self.wait.until(EC.staleness_of(previous_first_card))
+
+        # Require a short quiet period in which Amazon stops replacing the
+        # order-card elements. An empty set is also a valid settled result for
+        # a year with no orders.
+        render_state = {"card_ids": None, "changed_at": time.monotonic()}
+
+        def order_cards_settled(driver):
+            card_ids = tuple(
+                card.id for card in driver.find_elements(By.ID, "orderCard")
+            )
+            now = time.monotonic()
+            if card_ids != render_state["card_ids"]:
+                render_state["card_ids"] = card_ids
+                render_state["changed_at"] = now
+                return False
+            return now - render_state["changed_at"] >= 1.0
+
+        self.wait.until(order_cards_settled)
         
         # If no year specified, list available years
         if not year:
